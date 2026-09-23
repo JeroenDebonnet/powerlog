@@ -1,0 +1,25 @@
+# Build output
+build/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Executables
+*.out
+*.elf
+*.bin
+
+# Object files
+*.o
+*.a
+*.so
+
+# Editor
+.vscode/*.log
+
+# OS files
+.DS_Store
+Thumbs.db
