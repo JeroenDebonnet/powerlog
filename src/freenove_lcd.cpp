@@ -1,3 +1,8 @@
+/* FreeNove LCD driver class
+ * Copyright (c) 2026, Jeroen Debonnet
+ * This file is part of the P1-logger project.
+ * FreeNove LCD is a 20x4 character LCD with an I2C backpack based on the PCF8574 chip.
+*/
 #include "freenove_lcd.hpp"
 
 #include <cerrno>
