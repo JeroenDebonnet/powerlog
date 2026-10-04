@@ -24,26 +24,26 @@ void handle_signal(int signal_number)
 }
 }
 
-/** Start de P1-logger met seriële poort, CSV-bestand en optionele baudrate.
+/** Start de P1-logger met seriële poort, optionele logmap en baudrate.
  * @param argc Aantal command-lineargumenten.
- * @param argv Command-lineargumenten: poort, CSV-bestand en optioneel baudrate.
+ * @param argv Command-lineargumenten: poort, optionele logmap en baudrate.
  * @return EXIT_SUCCESS bij normaal einde, anders EXIT_FAILURE.
  */
 int main(int argc, char* argv[])
 {
-    if (argc < 3 || argc > 6)
+    if (argc < 2 || argc > 6)
     {
         std::cerr << "gebruik: " << argv[0]
-                  << " <seriele-poort> <csv-bestand> [baudrate] [i2c-device] [i2c-adres]\n"
+                  << " <seriele-poort> [logmap] [baudrate] [i2c-device] [i2c-adres]\n"
                   << "voorbeeld: " << argv[0]
-                  << " /dev/ttyUSB0 meter.csv 115200 /dev/i2c-1 0x27\n";
+                  << " /dev/ttyUSB0 ./logs 115200 /dev/i2c-1 0x27\n";
         return EXIT_FAILURE;
     }
 
     try
     {
-        const int baud_rate = argc == 4 ? std::stoi(argv[3]) : 115200;
-        P1Logger logger(argv[1], argv[2], baud_rate);
+        const int baud_rate = argc >= 4 ? std::stoi(argv[3]) : 115200;
+        P1Logger logger(argv[1], argc >= 3 ? argv[2] : "", baud_rate);
         const std::string i2c_device = argc >= 5 ? argv[4] : "/dev/i2c-1";
         const auto i2c_address = argc == 6
                                      ? static_cast<std::uint8_t>(std::stoul(argv[5], nullptr, 0))

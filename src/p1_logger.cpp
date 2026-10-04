@@ -4,12 +4,14 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fcntl.h>
 #include <iomanip>
 #include <array>
 #include <sstream>
 #include <stdexcept>
 #include <optional>
+#include <string_view>
 #include <termios.h>
 #include <unistd.h>
 
@@ -29,22 +31,78 @@ speed_t to_termios_baud(int baud_rate)
     }
 }
 
-/** Maakt tekst geschikt voor gebruik als één CSV-veld.
- * @param value Tekst die in het CSV-bestand moet komen.
- * @return De gequote en ge-escape-te tekst.
+/** Verwijdert het tweede CSV-veld, ook wanneer dit gequote komma's bevat.
+ * @param line Een regel uit de bestaande logfile.
+ * @return De regel zonder het tweede veld.
  */
-std::string csv_escape(const std::string& value)
+std::string remove_second_csv_field(const std::string& line)
 {
-    std::string escaped = "\"";
-    for (const char character : value)
+    const std::size_t first_separator = line.find(',');
+    if (first_separator == std::string::npos)
+        return line;
+
+    const std::size_t field_start = first_separator + 1;
+    std::size_t second_separator = std::string::npos;
+    if (field_start < line.size() && line[field_start] == '"')
     {
-        if (character == '"')
-            escaped += "\"\"";
-        else if (character != '\r' && character != '\n')
-            escaped += character;
+        for (std::size_t index = field_start + 1; index < line.size(); ++index)
+        {
+            if (line[index] != '"')
+                continue;
+            if (index + 1 < line.size() && line[index + 1] == '"')
+            {
+                ++index;
+                continue;
+            }
+            if (index + 1 < line.size() && line[index + 1] == ',')
+                second_separator = index + 1;
+            break;
+        }
     }
-    escaped += '"';
-    return escaped;
+    else
+    {
+        second_separator = line.find(',', field_start);
+    }
+
+    if (second_separator == std::string::npos)
+        return line;
+    return line.substr(0, first_separator + 1) + line.substr(second_separator + 1);
+}
+
+/** Migreert een bestaande logfile die nog een telegramkolom bevat.
+ * @param file_path Pad naar de dagelijkse meetwaardenlog.
+ */
+void migrate_legacy_csv(const std::filesystem::path& file_path)
+{
+    std::ifstream input(file_path);
+    if (!input)
+        throw std::runtime_error("kan bestaande CSV niet lezen: " + file_path.string());
+
+    std::string header;
+    if (!std::getline(input, header) || header.rfind("timestamp,telegram,", 0) != 0)
+        return;
+
+    const auto temporary_path = file_path.string() + ".tmp." + std::to_string(getpid());
+    std::ofstream output(temporary_path, std::ios::out | std::ios::trunc);
+    if (!output)
+        throw std::runtime_error("kan tijdelijke CSV niet openen: " + temporary_path);
+
+    output << remove_second_csv_field(header) << '\n';
+    std::string line;
+    while (std::getline(input, line))
+        output << remove_second_csv_field(line) << '\n';
+
+    output.flush();
+    if (!input.eof() || !output)
+    {
+        output.close();
+        std::filesystem::remove(temporary_path);
+        throw std::runtime_error("fout bij migreren van CSV-bestand: " + file_path.string());
+    }
+
+    input.close();
+    output.close();
+    std::filesystem::rename(temporary_path, file_path);
 }
 
 /** Geeft de huidige lokale tijd terug in ISO-achtige notatie.
@@ -59,6 +117,36 @@ std::string timestamp_now()
 
     std::ostringstream result;
     result << std::put_time(&local_time, "%Y-%m-%dT%H:%M:%S");
+    return result.str();
+}
+
+/** Geeft de huidige lokale datum terug als bestandsnaamcomponent.
+ * @return Datum in de vorm YYYY-MM-DD.
+ */
+std::string date_now()
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+    localtime_r(&time, &local_time);
+
+    std::ostringstream result;
+    result << std::put_time(&local_time, "%Y-%m-%d");
+    return result.str();
+}
+
+/** Geeft de huidige lokale minuut terug als unieke log-sleutel.
+ * @return Tijdstip in de vorm YYYY-MM-DDTHH:MM met tijdzone.
+ */
+std::string minute_now()
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+    localtime_r(&time, &local_time);
+
+    std::ostringstream result;
+    result << std::put_time(&local_time, "%Y-%m-%dT%H:%M%z");
     return result.str();
 }
 
@@ -174,25 +262,78 @@ void write_measurement(std::ostream& output, const Measurement& measurement)
 }
 }
 
-/** Maakt een P1Logger aan voor een seriële poort en CSV-bestand.
+/** Maakt een P1Logger aan voor een seriële poort en dagelijkse CSV-bestanden.
  * @param serial_device Pad naar de RS232/seriële poort.
- * @param csv_file Pad naar het CSV-bestand.
+ * @param log_directory Map voor de dagelijkse CSV-bestanden; leeg gebruikt de executable-map.
  * @param baud_rate Baudrate van de seriële poort.
  */
-P1Logger::P1Logger(std::string serial_device, std::string csv_file, int baud_rate)
-    : serial_device_(std::move(serial_device)), csv_file_(std::move(csv_file)), baud_rate_(baud_rate)
+P1Logger::P1Logger(std::string serial_device, std::string log_directory, int baud_rate)
+    : serial_device_(std::move(serial_device)),
+      log_directory_(std::move(log_directory)),
+      baud_rate_(baud_rate)
 {
-    if (!csv_file_)
-        throw std::runtime_error("kan CSV-bestand niet openen");
+    if (log_directory_.empty())
+        log_directory_ = std::filesystem::canonical("/proc/self/exe").parent_path();
 
+    std::filesystem::create_directories(log_directory_);
+}
+
+/** Opent het CSV-bestand voor de huidige lokale datum wanneer dat nodig is. */
+void P1Logger::open_daily_file()
+{
+    const std::string date = date_now();
+    if (date == current_log_date_)
+        return;
+
+    csv_file_.close();
+    csv_file_.clear();
+    telegram_file_.close();
+    telegram_file_.clear();
+    const auto file_path = log_directory_ / (date + ".csv");
+    const auto telegram_path = log_directory_ / (date + "-TELEGRAM.log");
+    if (std::filesystem::exists(file_path))
+        migrate_legacy_csv(file_path);
+
+    csv_file_.open(file_path, std::ios::out | std::ios::app);
+    if (!csv_file_)
+        throw std::runtime_error("kan CSV-bestand niet openen: " + file_path.string());
+    telegram_file_.open(telegram_path, std::ios::out | std::ios::app);
+    if (!telegram_file_)
+        throw std::runtime_error("kan telegramlog niet openen: " + telegram_path.string());
+
+    current_log_date_ = date;
     csv_file_.seekp(0, std::ios::end);
     if (csv_file_.tellp() == 0)
     {
-        csv_file_ << "timestamp,telegram,"
+        csv_file_ << "timestamp,"
                   << "l1_consumption_kw,l1_injection_kw,l1_current_a,l1_voltage_v,"
                   << "l2_consumption_kw,l2_injection_kw,l2_current_a,l2_voltage_v,"
                   << "l3_consumption_kw,l3_injection_kw,l3_current_a,l3_voltage_v\n";
     }
+
+    last_telegram_minute_.clear();
+    std::ifstream existing_telegram_log(telegram_path);
+    std::string line;
+    constexpr std::string_view minute_prefix = "# minute=";
+    while (std::getline(existing_telegram_log, line))
+    {
+        if (line.rfind(minute_prefix, 0) == 0)
+            last_telegram_minute_ = line.substr(minute_prefix.size());
+    }
+}
+
+/** Schrijft alleen het eerste geldige telegram van iedere lokale minuut weg. */
+void P1Logger::write_telegram_if_due(const std::string& telegram)
+{
+    const std::string minute = minute_now();
+    if (minute == last_telegram_minute_)
+        return;
+
+    telegram_file_ << "# minute=" << minute << '\n' << telegram;
+    telegram_file_.flush();
+    if (!telegram_file_)
+        throw std::runtime_error("fout bij schrijven naar telegramlog");
+    last_telegram_minute_ = minute;
 }
 
 /** Sluit de seriële filedescriptor wanneer die geopend is. */
@@ -262,17 +403,19 @@ void P1Logger::read_available_bytes()
     }
 }
 
-/** Parseert één compleet telegram en schrijft één CSV-regel.
+/** Parseert één compleet telegram en schrijft de meetwaarden naar de CSV.
  * @param telegram Compleet, CRC-gevalideerd P1-telegram.
  */
 void P1Logger::write_csv_row(const std::string& telegram)
 {
+    open_daily_file();
+
     constexpr std::array phase_codes = {
         std::array{"21.7.0", "22.7.0", "31.7.0", "32.7.0"},
         std::array{"41.7.0", "42.7.0", "51.7.0", "52.7.0"},
         std::array{"61.7.0", "62.7.0", "71.7.0", "72.7.0"}};
 
-    csv_file_ << timestamp_now() << ',' << csv_escape(telegram);
+    csv_file_ << timestamp_now();
     for (const auto& phase : phase_codes)
     {
         for (const auto& code : phase)
@@ -298,6 +441,8 @@ void P1Logger::write_csv_row(const std::string& telegram)
     csv_file_.flush();
     if (!csv_file_)
         throw std::runtime_error("fout bij schrijven naar CSV-bestand");
+
+    write_telegram_if_due(telegram);
 }
 
 /** Verwerkt beschikbare seriële data zonder op nieuwe bytes te wachten.
