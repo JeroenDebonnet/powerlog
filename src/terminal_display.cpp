@@ -72,6 +72,14 @@ bool TerminalDisplay::update(const std::array<PhasePower, 3>& phase_measurements
              consumption.c_str(), injection.c_str());
         mvprintw(row + 1, 0, "   U:%sV A:%sA", voltage.c_str(), current.c_str());
     }
+    mvprintw(12, 0, "Total consumption: %skW", format_value(
+        phase_measurements[0].consumption_kw.value_or(0.0) +
+        phase_measurements[1].consumption_kw.value_or(0.0) +
+        phase_measurements[2].consumption_kw.value_or(0.0), 3).c_str());
+    mvprintw(13, 0, "Total injection  : %skW", format_value(
+        phase_measurements[0].injection_kw.value_or(0.0) +
+        phase_measurements[1].injection_kw.value_or(0.0) +
+        phase_measurements[2].injection_kw.value_or(0.0), 3).c_str());
     refresh();
 
     const int key = getch();
