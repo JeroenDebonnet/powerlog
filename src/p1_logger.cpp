@@ -1,22 +1,127 @@
 #include "p1_logger.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
 #include <iomanip>
 #include <array>
+#include <iostream>
+#include <spawn.h>
 #include <sstream>
 #include <stdexcept>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <termios.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+extern char** environ;
 
 namespace
 {
+bool is_daily_csv(const std::filesystem::path& path)
+{
+    if (path.extension() != ".csv")
+        return false;
+
+    const std::string date = path.stem().string();
+    if (date.size() != 10 || date[4] != '-' || date[7] != '-')
+        return false;
+
+    return std::all_of(date.begin(), date.end(), [](unsigned char character)
+    {
+        return character == '-' || std::isdigit(character) != 0;
+    });
+}
+
+void launch_plot(const std::filesystem::path& csv_path)
+{
+    const auto executable_path = std::filesystem::canonical("/proc/self/exe");
+    const auto script_path = executable_path.parent_path() / "plot_powerlog.py";
+    if (!std::filesystem::exists(script_path))
+    {
+        std::cerr << "waarschuwing: plotprogramma niet gevonden: " << script_path << '\n';
+        return;
+    }
+
+    std::string python = "python3";
+    std::string script = script_path.string();
+    std::string input = csv_path.string();
+    char* arguments[] = {python.data(), script.data(), input.data(), nullptr};
+
+    posix_spawn_file_actions_t file_actions;
+    int result = posix_spawn_file_actions_init(&file_actions);
+    if (result != 0)
+    {
+        std::cerr << "waarschuwing: plotacties niet initialiseerbaar: "
+                  << std::strerror(result) << '\n';
+        return;
+    }
+
+    result = posix_spawn_file_actions_addopen(
+        &file_actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    if (result != 0)
+    {
+        posix_spawn_file_actions_destroy(&file_actions);
+        std::cerr << "waarschuwing: plotuitvoer niet instelbaar: "
+                  << std::strerror(result) << '\n';
+        return;
+    }
+
+    pid_t process_id = -1;
+    result = posix_spawnp(
+        &process_id, python.c_str(), &file_actions, nullptr, arguments, environ);
+    posix_spawn_file_actions_destroy(&file_actions);
+    if (result != 0)
+    {
+        std::cerr << "waarschuwing: plotprogramma starten mislukt: "
+                  << std::strerror(result) << '\n';
+        return;
+    }
+
+    std::thread([process_id, csv_path]
+    {
+        int status = 0;
+        pid_t waited;
+        do
+        {
+            waited = waitpid(process_id, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+
+        if (waited < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            std::cerr << "waarschuwing: PNG renderen mislukt voor " << csv_path << '\n';
+    }).detach();
+}
+
+void render_pending_daily_csvs(const std::filesystem::path& log_directory,
+                               const std::string& current_date)
+{
+    std::error_code error;
+    for (std::filesystem::directory_iterator entry(log_directory, error), end;
+         !error && entry != end; entry.increment(error))
+    {
+        const auto& csv_path = entry->path();
+        const std::string date = csv_path.stem().string();
+        if (!is_daily_csv(csv_path) || date >= current_date)
+            continue;
+
+        auto png_path = csv_path;
+        png_path.replace_extension(".png");
+        if (!std::filesystem::exists(png_path, error) && !error)
+            launch_plot(csv_path);
+        error.clear();
+    }
+
+    if (error)
+        std::cerr << "waarschuwing: logmap niet volledig gescand: " << error.message() << '\n';
+}
+
 /** Zet een numerieke baudrate om naar de bijbehorende termios-constante.
  * @param baud_rate Baudrate, momenteel 9600 of 115200.
  * @return De termios-waarde voor de baudrate.
@@ -320,6 +425,8 @@ void P1Logger::open_daily_file()
         if (line.rfind(minute_prefix, 0) == 0)
             last_telegram_minute_ = line.substr(minute_prefix.size());
     }
+
+    render_pending_daily_csvs(log_directory_, date);
 }
 
 /** Schrijft alleen het eerste geldige telegram van iedere lokale minuut weg. */
