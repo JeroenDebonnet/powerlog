@@ -17,11 +17,13 @@ PHASE_COLUMNS = (
     "l2_consumption_kw",
     "l3_consumption_kw",
 )
+INJECTION_COLUMN = "l3_injection_kw"
 
 
 def load_power_data(csv_path: Path):
     timestamps = []
     phase_values = {column: [] for column in PHASE_COLUMNS}
+    injection_values = []
     total_values = []
     skipped_rows = 0
 
@@ -47,19 +49,26 @@ def load_power_data(csv_path: Path):
             total_values.append(sum(phases))
             for column, value in zip(PHASE_COLUMNS, phases):
                 phase_values[column].append(value)
+            try:
+                injection = float(row[INJECTION_COLUMN])
+                if not math.isfinite(injection):
+                    injection = None
+            except (KeyError, TypeError, ValueError):
+                injection = None
+            injection_values.append(injection)
 
     if not timestamps:
         raise ValueError("geen geldige meetregels gevonden")
 
-    return timestamps, phase_values, total_values, skipped_rows
+    return timestamps, phase_values, injection_values, total_values, skipped_rows
 
 
 def render_chart(csv_path: Path, output_path: Path):
-    timestamps, phase_values, total_values, skipped_rows = load_power_data(csv_path)
+    timestamps, phase_values, injection_values, total_values, skipped_rows = load_power_data(csv_path)
 
     figure, axis = plt.subplots(figsize=(12, 6), layout="constrained")
     phase_labels = {"l1": "Fase 1", "l2": "Fase 2", "l3": "Fase 3"}
-    for column, color in zip(PHASE_COLUMNS, ("#d97706", "#15803d", "#2563eb")):
+    for column, color in zip(PHASE_COLUMNS, ("red", "green", "blue")):
         phase = column[:2]
         axis.plot(
             timestamps,
@@ -69,6 +78,16 @@ def render_chart(csv_path: Path, output_path: Path):
             alpha=0.8,
             label=phase_labels[phase],
         )
+
+    axis.fill_between(
+        timestamps,
+        0,
+        injection_values,
+        color="orange",
+        alpha=0.5,
+        label="Fase 3 teruglevering",
+        zorder=0,
+    )
 
     axis.plot(
         timestamps,
@@ -82,7 +101,7 @@ def render_chart(csv_path: Path, output_path: Path):
     axis.set_xlabel("Tijd")
     axis.set_ylabel("Vermogen (kW)")
     axis.grid(True, color="#cbd5e1", linewidth=0.7, alpha=0.7)
-    axis.legend(loc="best", frameon=False, ncols=4)
+    axis.legend(loc="upper left", frameon=False, ncols=5)
 
     if timestamps[0].date() == timestamps[-1].date():
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))

@@ -1,3 +1,6 @@
 python3 plot_powerlog.py build/logs/2026-10-04.csv
 ps -ef | grep powerlog
-
+nohup ./powerlog /dev/serial0 ./logs &
+cat nohup.out
+tput cnorm
+tail -20 nohup.out | cat -v

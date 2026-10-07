@@ -23,3 +23,7 @@ Makefile
 # OS files
 .DS_Store
 Thumbs.db
+
+#python cache
+__pycache__/
+
