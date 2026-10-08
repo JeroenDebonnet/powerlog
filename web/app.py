@@ -8,6 +8,43 @@ from dash.exceptions import PreventUpdate
 
 
 CSV_DIRECTORY = Path("../build/logs").resolve()
+VALUE_PRESETS = {
+    "power": (
+        "l1_consumption_kw",
+        "l2_consumption_kw",
+        "l3_consumption_kw",
+        "l3_injection_kw",
+    ),
+    "meters": (
+        "t1_consumption_meter_kwh",
+        "t2_consumption_meter_kwh",
+        "t1_injection_meter_kwh",
+        "t2_injection_meter_kwh",
+        "gas_meter_m3",
+    ),
+}
+VALUE_COLORS = {
+    "l1_consumption_kw": "red",
+    "l2_consumption_kw": "green",
+    "l3_consumption_kw": "blue",
+    "l3_injection_kw": "orange",
+    "t1_consumption_meter_kwh": "red",
+    "t2_consumption_meter_kwh": "green",
+    "t1_injection_meter_kwh": "blue",
+    "t2_injection_meter_kwh": "orange",
+    "gas_meter_m3": "#172554",
+}
+VALUE_RENDER_MODES = {
+    "l1_consumption_kw": "line",
+    "l2_consumption_kw": "line",
+    "l3_consumption_kw": "line",
+    "l3_injection_kw": "area",
+    "t1_consumption_meter_kwh": "line",
+    "t2_consumption_meter_kwh": "line",
+    "t1_injection_meter_kwh": "line",
+    "t2_injection_meter_kwh": "line",
+    "gas_meter_m3": "line",
+}
 
 app = Dash(__name__)
 app.title = "PowerLog CSV Viewer"
@@ -89,6 +126,16 @@ app.layout = html.Div(
 
                 html.Div([
                     html.Label("Waarden in grafiek"),
+                    dcc.RadioItems(
+                        id="value-preset",
+                        options=[
+                            {"label": "Vermogen", "value": "power"},
+                            {"label": "Meterstanden", "value": "meters"},
+                        ],
+                        value="power",
+                        inline=True,
+                        labelStyle={"display": "inline-block", "marginRight": "12px"},
+                    ),
                     dcc.Dropdown(
                         id="value-columns",
                         multi=True,
@@ -147,22 +194,23 @@ def refresh_file_list(_):
     Output("time-column", "value"),
     Output("value-columns", "options"),
     Output("value-columns", "value"),
+    Output("value-preset", "value"),
     Output("status", "children"),
     Input("csv-file", "value"),
 )
 def load_columns(filename):
     if not filename:
-        return [], None, [], [], "Geen CSV-bestand beschikbaar."
+        return [], None, [], [], "power", "Geen CSV-bestand beschikbaar."
 
     try:
         df = read_csv(filename)
     except Exception as exc:
-        return [], None, [], [], f"Fout bij lezen van CSV: {exc}"
+        return [], None, [], [], "power", f"Fout bij lezen van CSV: {exc}"
 
     columns = list(df.columns)
 
     if not columns:
-        return [], None, [], [], "Het CSV-bestand bevat geen kolommen."
+        return [], None, [], [], "power", "Het CSV-bestand bevat geen kolommen."
 
     # Zoek een waarschijnlijke tijdskolom.
     time_names = {
@@ -192,8 +240,9 @@ def load_columns(filename):
         )
     ]
 
-    # Toon standaard maximaal de eerste drie meetwaarden.
-    default_values = numeric_columns[:3]
+    default_values = [
+        column for column in VALUE_PRESETS["power"] if column in numeric_columns
+    ]
 
     options = [
         {"label": column, "value": column}
@@ -210,8 +259,22 @@ def load_columns(filename):
         time_column,
         value_options,
         default_values,
+        "power",
         f"{len(df):,} records geladen uit {filename}".replace(",", "."),
     )
+
+
+@app.callback(
+    Output("value-columns", "value", allow_duplicate=True),
+    Input("value-preset", "value"),
+    State("value-columns", "options"),
+    prevent_initial_call=True,
+)
+def select_value_preset(preset, options):
+    available_columns = {option["value"] for option in options or []}
+    return [
+        column for column in VALUE_PRESETS[preset] if column in available_columns
+    ]
 
 
 @app.callback(
@@ -248,7 +311,13 @@ def update_graph(filename, time_column, value_columns):
 
     figure = go.Figure()
 
-    for column in selected_columns:
+    draw_order = sorted(
+        selected_columns,
+        key=lambda column: VALUE_RENDER_MODES.get(column) != "area",
+    )
+    legend_ranks = {column: rank for rank, column in enumerate(selected_columns)}
+
+    for column in draw_order:
         values = pd.to_numeric(df[column], errors="coerce")
 
         figure.add_trace(
@@ -257,6 +326,13 @@ def update_graph(filename, time_column, value_columns):
                 y=values,
                 mode="lines",
                 name=column,
+                legendrank=legend_ranks[column],
+                line={"color": VALUE_COLORS.get(column)},
+                fill=(
+                    "tozeroy"
+                    if VALUE_RENDER_MODES.get(column) == "area"
+                    else None
+                ),
                 connectgaps=False,
             )
         )
