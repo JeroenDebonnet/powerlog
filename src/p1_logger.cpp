@@ -1,25 +1,29 @@
 #include "p1_logger.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fcntl.h>
 #include <iomanip>
-#include <array>
 #include <iostream>
 #include <spawn.h>
 #include <sstream>
 #include <stdexcept>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <thread>
 #include <termios.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 extern char** environ;
 
@@ -38,6 +42,37 @@ bool is_daily_csv(const std::filesystem::path& path)
     {
         return character == '-' || std::isdigit(character) != 0;
     });
+}
+
+std::optional<std::chrono::system_clock::time_point> parse_timestamp(const std::string& value)
+{
+    std::tm local_time{};
+    std::istringstream input(value);
+    input >> std::get_time(&local_time, "%Y-%m-%dT%H:%M:%S");
+    if (input.fail())
+        return std::nullopt;
+
+    local_time.tm_isdst = -1;
+    const std::time_t time = std::mktime(&local_time);
+    if (time == static_cast<std::time_t>(-1))
+        return std::nullopt;
+    return std::chrono::system_clock::from_time_t(time);
+}
+
+std::optional<double> parse_csv_number(const std::string& value)
+{
+    try
+    {
+        std::size_t parsed_characters = 0;
+        const double number = std::stod(value, &parsed_characters);
+        if (parsed_characters != value.size() || !std::isfinite(number))
+            return std::nullopt;
+        return number;
+    }
+    catch (const std::exception&)
+    {
+        return std::nullopt;
+    }
 }
 
 void launch_plot(const std::filesystem::path& csv_path)
@@ -414,7 +449,11 @@ void P1Logger::open_daily_file()
                   << "l1_consumption_kw,l1_injection_kw,l1_current_a,l1_voltage_v,"
                   << "l2_consumption_kw,l2_injection_kw,l2_current_a,l2_voltage_v,"
                   << "l3_consumption_kw,l3_injection_kw,l3_current_a,l3_voltage_v\n";
+        csv_file_.flush();
     }
+
+    append_missing_daily_energy_summaries(date);
+    load_daily_energy(file_path);
 
     last_telegram_minute_.clear();
     std::ifstream existing_telegram_log(telegram_path);
@@ -453,6 +492,203 @@ P1Logger::~P1Logger()
 const std::array<PhasePower, 3>& P1Logger::latest_phase_power() const
 {
     return latest_phase_power_;
+}
+
+const DailyEnergy& P1Logger::daily_energy() const
+{
+    return daily_energy_;
+}
+
+void P1Logger::load_daily_energy(const std::filesystem::path& csv_path)
+{
+    daily_energy_ = {};
+    previous_energy_timestamp_.reset();
+    previous_consumption_kw_ = {};
+    previous_injection_kw_ = {};
+
+    std::ifstream csv_file(csv_path);
+    std::string line;
+    if (!std::getline(csv_file, line))
+        return;
+
+    constexpr std::array<std::size_t, 3> consumption_columns = {1, 5, 9};
+    constexpr std::array<std::size_t, 3> injection_columns = {2, 6, 10};
+    while (std::getline(csv_file, line))
+    {
+        std::array<std::string, 13> fields;
+        std::istringstream row(line);
+        std::size_t field_count = 0;
+        while (field_count < fields.size() && std::getline(row, fields[field_count], ','))
+            ++field_count;
+        if (field_count != fields.size())
+            continue;
+
+        std::array<PhasePower, 3> phase_power;
+        for (std::size_t phase = 0; phase < phase_power.size(); ++phase)
+        {
+            phase_power[phase].consumption_kw = parse_csv_number(fields[consumption_columns[phase]]);
+            phase_power[phase].injection_kw = parse_csv_number(fields[injection_columns[phase]]);
+        }
+        accumulate_energy_sample(fields[0], phase_power);
+    }
+}
+
+void P1Logger::append_missing_daily_energy_summaries(const std::string& current_date)
+{
+    const auto summary_path = log_directory_ / "daily_energy.csv";
+    std::set<std::string> recorded_dates;
+    std::ifstream existing_summary(summary_path);
+    if (existing_summary)
+    {
+        std::string line;
+        std::getline(existing_summary, line);
+        while (std::getline(existing_summary, line))
+        {
+            const std::size_t separator = line.find(',');
+            if (separator != std::string::npos)
+                recorded_dates.insert(line.substr(0, separator));
+        }
+    }
+    else
+    {
+        std::error_code error;
+        if (std::filesystem::exists(summary_path, error) || error)
+        {
+            std::cerr << "waarschuwing: dagtotalenbestand niet leesbaar: "
+                      << summary_path << '\n';
+            return;
+        }
+    }
+
+    std::vector<std::pair<std::string, std::filesystem::path>> daily_files;
+    std::error_code error;
+    for (std::filesystem::directory_iterator entry(log_directory_, error), end;
+         !error && entry != end; entry.increment(error))
+    {
+        const auto& path = entry->path();
+        const std::string date = path.stem().string();
+        if (is_daily_csv(path) && date < current_date && !recorded_dates.contains(date))
+            daily_files.emplace_back(date, path);
+    }
+    if (error)
+    {
+        std::cerr << "waarschuwing: dagbestanden niet volledig gescand: "
+                  << error.message() << '\n';
+        return;
+    }
+    std::sort(daily_files.begin(), daily_files.end(),
+              [](const auto& left, const auto& right)
+              {
+                  return left.first < right.first;
+              });
+    if (daily_files.empty())
+        return;
+
+    std::vector<std::pair<std::string, DailyEnergy>> pending_summaries;
+    for (const auto& [date, path] : daily_files)
+    {
+        load_daily_energy(path);
+        pending_summaries.emplace_back(date, daily_energy_);
+    }
+
+    bool write_header = false;
+    const bool summary_exists = std::filesystem::exists(summary_path, error);
+    if (error)
+    {
+        std::cerr << "waarschuwing: dagtotalenbestand niet gecontroleerd: "
+                  << error.message() << '\n';
+        return;
+    }
+    if (!summary_exists)
+        write_header = true;
+    else
+    {
+        const auto summary_size = std::filesystem::file_size(summary_path, error);
+        if (error)
+        {
+            std::cerr << "waarschuwing: grootte dagtotalenbestand niet gelezen: "
+                      << error.message() << '\n';
+            return;
+        }
+        write_header = summary_size == 0;
+    }
+
+    std::ofstream summary_file(summary_path, std::ios::out | std::ios::app);
+    if (!summary_file)
+    {
+        std::cerr << "waarschuwing: dagtotalenbestand niet te openen: "
+                  << summary_path << '\n';
+        return;
+    }
+    if (write_header)
+    {
+        summary_file << "date,l1_consumption_kwh,l2_consumption_kwh,l3_consumption_kwh,"
+                     << "total_consumption_kwh,l1_injection_kwh,l2_injection_kwh,"
+                     << "l3_injection_kwh,total_injection_kwh\n";
+    }
+
+    summary_file << std::fixed << std::setprecision(6);
+    for (const auto& [date, energy] : pending_summaries)
+    {
+        const double total_consumption = energy.consumption_kwh[0] +
+                                         energy.consumption_kwh[1] +
+                                         energy.consumption_kwh[2];
+        const double total_injection = energy.injection_kwh[0] +
+                                       energy.injection_kwh[1] +
+                                       energy.injection_kwh[2];
+        summary_file << date << ','
+                     << energy.consumption_kwh[0] << ','
+                     << energy.consumption_kwh[1] << ','
+                     << energy.consumption_kwh[2] << ','
+                     << total_consumption << ','
+                     << energy.injection_kwh[0] << ','
+                     << energy.injection_kwh[1] << ','
+                     << energy.injection_kwh[2] << ','
+                     << total_injection << '\n';
+    }
+    summary_file.flush();
+    if (!summary_file)
+        std::cerr << "waarschuwing: fout bij schrijven van dagtotalenbestand: "
+                  << summary_path << '\n';
+}
+
+void P1Logger::accumulate_energy_sample(
+    const std::string& timestamp, const std::array<PhasePower, 3>& phase_power)
+{
+    const auto sample_time = parse_timestamp(timestamp);
+    if (!sample_time)
+        return;
+
+    if (previous_energy_timestamp_)
+    {
+        const double elapsed_seconds = std::chrono::duration<double>(
+            *sample_time - *previous_energy_timestamp_).count();
+        if (elapsed_seconds > 0.0 && elapsed_seconds <= 5.0)
+        {
+            for (std::size_t phase = 0; phase < phase_power.size(); ++phase)
+            {
+                const auto add_energy = [elapsed_seconds](
+                    const std::optional<double>& previous,
+                    const std::optional<double>& current,
+                    double& total)
+                {
+                    if (previous && current && *previous >= 0.0 && *current >= 0.0)
+                        total += (*previous + *current) * 0.5 * elapsed_seconds / 3600.0;
+                };
+                add_energy(previous_consumption_kw_[phase], phase_power[phase].consumption_kw,
+                           daily_energy_.consumption_kwh[phase]);
+                add_energy(previous_injection_kw_[phase], phase_power[phase].injection_kw,
+                           daily_energy_.injection_kwh[phase]);
+            }
+        }
+    }
+
+    previous_energy_timestamp_ = sample_time;
+    for (std::size_t phase = 0; phase < phase_power.size(); ++phase)
+    {
+        previous_consumption_kw_[phase] = phase_power[phase].consumption_kw;
+        previous_injection_kw_[phase] = phase_power[phase].injection_kw;
+    }
 }
 
 /** Opent de seriële poort en stelt non-blocking 8N1 in.
@@ -522,7 +758,8 @@ void P1Logger::write_csv_row(const std::string& telegram)
         std::array{"41.7.0", "42.7.0", "51.7.0", "52.7.0"},
         std::array{"61.7.0", "62.7.0", "71.7.0", "72.7.0"}};
 
-    csv_file_ << timestamp_now();
+    const std::string timestamp = timestamp_now();
+    csv_file_ << timestamp;
     for (const auto& phase : phase_codes)
     {
         for (const auto& code : phase)
@@ -543,6 +780,8 @@ void P1Logger::write_csv_row(const std::string& telegram)
         latest_phase_power_[phase].voltage_v =
             find_measurement(telegram, phase_codes[phase][3]).value;
     }
+
+            accumulate_energy_sample(timestamp, latest_phase_power_);
 
     csv_file_ << '\n';
     csv_file_.flush();

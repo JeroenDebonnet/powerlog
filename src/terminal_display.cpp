@@ -34,6 +34,13 @@ std::string cpu_temperature()
          << static_cast<double>(temperature_millidegrees) / 1000.0;
     return text.str();
 }
+
+std::string format_energy(double energy_kwh)
+{
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(3) << energy_kwh;
+    return text.str();
+}
 }
 
 TerminalDisplay::TerminalDisplay()
@@ -53,7 +60,8 @@ TerminalDisplay::~TerminalDisplay()
     endwin();
 }
 
-bool TerminalDisplay::update(const std::array<PhasePower, 3>& phase_measurements)
+bool TerminalDisplay::update(const std::array<PhasePower, 3>& phase_measurements,
+                             const DailyEnergy& daily_energy)
 {
     erase();
     mvprintw(0, 0, "Powerlog - druk q om te stoppen");
@@ -80,6 +88,22 @@ bool TerminalDisplay::update(const std::array<PhasePower, 3>& phase_measurements
         phase_measurements[0].injection_kw.value_or(0.0) +
         phase_measurements[1].injection_kw.value_or(0.0) +
         phase_measurements[2].injection_kw.value_or(0.0), 3).c_str());
+    const double total_consumption = daily_energy.consumption_kwh[0] +
+                                     daily_energy.consumption_kwh[1] +
+                                     daily_energy.consumption_kwh[2];
+    const double total_injection = daily_energy.injection_kwh[0] +
+                                   daily_energy.injection_kwh[1] +
+                                   daily_energy.injection_kwh[2];
+    mvprintw(15, 0, "Afname kWh: L1 %s L2 %s L3 %s Totaal %s",
+             format_energy(daily_energy.consumption_kwh[0]).c_str(),
+             format_energy(daily_energy.consumption_kwh[1]).c_str(),
+             format_energy(daily_energy.consumption_kwh[2]).c_str(),
+             format_energy(total_consumption).c_str());
+    mvprintw(16, 0, "Injectie kWh: L1 %s L2 %s L3 %s Totaal %s",
+             format_energy(daily_energy.injection_kwh[0]).c_str(),
+             format_energy(daily_energy.injection_kwh[1]).c_str(),
+             format_energy(daily_energy.injection_kwh[2]).c_str(),
+             format_energy(total_injection).c_str());
     refresh();
 
     const int key = getch();

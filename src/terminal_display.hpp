@@ -23,7 +23,8 @@ public:
      * @param phase_measurements Meetwaarden voor L1, L2 en L3.
      * @return false wanneer de gebruiker 'q' indrukt of de terminal sluit.
      */
-    bool update(const std::array<PhasePower, 3>& phase_measurements);
+    bool update(const std::array<PhasePower, 3>& phase_measurements,
+                const DailyEnergy& daily_energy);
 
 private:
     /** Zet één optionele waarde om naar compacte terminaltekst.

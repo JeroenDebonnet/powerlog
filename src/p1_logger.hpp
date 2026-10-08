@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <array>
 #include <fstream>
 #include <filesystem>
@@ -12,6 +13,12 @@ struct PhasePower
     std::optional<double> injection_kw;
     std::optional<double> voltage_v;
     std::optional<double> current_a;
+};
+
+struct DailyEnergy
+{
+    std::array<double, 3> consumption_kwh{};
+    std::array<double, 3> injection_kwh{};
 };
 
 class P1Logger
@@ -41,12 +48,25 @@ public:
     /** Geeft de laatst succesvol CRC-gevalideerde vermogenswaarden terug. */
     const std::array<PhasePower, 3>& latest_phase_power() const;
 
+    /** Geeft de geïntegreerde afname en injectie van de huidige lokale dag terug. */
+    const DailyEnergy& daily_energy() const;
+
 private:
     /** Opent en configureert de seriële poort als non-blocking 8N1-verbinding. */
     void open_serial();
 
     /** Opent het datumgebonden CSV-bestand als de lokale datum is gewijzigd. */
     void open_daily_file();
+
+    /** Herstelt de energietotalen en laatste meting uit het huidige dagbestand. */
+    void load_daily_energy(const std::filesystem::path& csv_path);
+
+    /** Schrijft ontbrekende samenvattingsregels voor afgesloten dagbestanden. */
+    void append_missing_daily_energy_summaries(const std::string& current_date);
+
+    /** Integreert één meting met de vorige meting voor de dagtotalen. */
+    void accumulate_energy_sample(const std::string& timestamp,
+                                  const std::array<PhasePower, 3>& phase_power);
 
     /** Schrijft hoogstens één telegram per minuut naar het telegramlog. */
     void write_telegram_if_due(const std::string& telegram);
@@ -69,4 +89,8 @@ private:
     int serial_fd_ = -1;
     std::string input_buffer_;
     std::array<PhasePower, 3> latest_phase_power_;
+    DailyEnergy daily_energy_;
+    std::optional<std::chrono::system_clock::time_point> previous_energy_timestamp_;
+    std::array<std::optional<double>, 3> previous_consumption_kw_;
+    std::array<std::optional<double>, 3> previous_injection_kw_;
 };

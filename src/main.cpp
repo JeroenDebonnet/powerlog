@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <unistd.h>
 
 namespace
 {
@@ -58,7 +59,12 @@ int main(int argc, char* argv[])
             std::cerr << "waarschuwing: LCD uitgeschakeld: " << error.what() << '\n';
         }
 
-        TerminalDisplay terminal;
+        std::unique_ptr<TerminalDisplay> terminal;
+        if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO))
+            terminal = std::make_unique<TerminalDisplay>();
+        else
+            std::cerr << "waarschuwing: terminalweergave overgeslagen (geen interactieve terminal)\n";
+
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);
         auto next_display_update = std::chrono::steady_clock::now();
@@ -70,7 +76,8 @@ int main(int argc, char* argv[])
             {
                 if (lcd)
                     lcd->update(logger.latest_phase_power());
-                if (!terminal.update(logger.latest_phase_power()))
+                if (terminal && !terminal->update(
+                    logger.latest_phase_power(), logger.daily_energy()))
                     keep_running = 0;
                 next_display_update = now + std::chrono::seconds(1);
             }
