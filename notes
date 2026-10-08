@@ -4,3 +4,75 @@ nohup ./powerlog /dev/serial0 ./logs &
 cat nohup.out
 tput cnorm
 tail -20 nohup.out | cat -v
+
+Systemd service instellen voor webserver:
+=========================================
+sudo nano /etc/systemd/system/powerlog-web.service
+
+inhoud:
+[Unit]
+Description=PowerLog Dash Web Application
+After=network.target
+
+[Service]
+Type=simple
+User=jerd
+WorkingDirectory=/home/jerd/dev/powerlog/web
+ExecStart=/home/jerd/dev/powerlog/web/venv/bin/python app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+
+vervolgens:
+sudo systemctl daemon-reload
+
+sudo systemctl enable powerlog-web
+
+sudo systemctl start powerlog-web
+
+sudo systemctl status powerlog-web
+
+journalctl -u powerlog-web -f
+
+sudo systemctl stop powerlog-web
+
+sudo systemctl restart powerlog-web
+
+Systemd service instellen voor powerlog:
+========================================
+sudo nano /etc/systemd/system/powerlog.service
+
+inhoud:
+[Unit]
+Description=PowerLog Data Logger
+After=network.target
+
+[Service]
+Type=simple
+User=jerd
+WorkingDirectory=/home/jerd/dev/powerlog/build
+
+ExecStart=/home/jerd/dev/powerlog/build/powerlog \
+          /dev/serial0 \
+          ./logs
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+sudo systemctl daemon-reload
+sudo systemctl enable powerlog
+sudo systemctl start powerlog
+sudo systemctl status powerlog
+journalctl -u powerlog -f
+
