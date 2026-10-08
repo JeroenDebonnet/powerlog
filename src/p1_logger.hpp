@@ -21,6 +21,7 @@ struct DailyEnergy
     std::array<double, 3> injection_kwh{};
     std::array<std::optional<double>, 2> tariff_consumption_kwh{};
     std::array<std::optional<double>, 2> tariff_injection_kwh{};
+    std::optional<double> gas_meter_m3;
 };
 
 class P1Logger

@@ -251,7 +251,8 @@ void migrate_legacy_csv(const std::filesystem::path& file_path)
         : header;
     const bool add_tariff_columns =
         migrated_header.find("t1_consumption_meter_kwh") == std::string::npos;
-    if (!has_legacy_telegram && !add_tariff_columns)
+    const bool add_gas_column = migrated_header.find("gas_meter_m3") == std::string::npos;
+    if (!has_legacy_telegram && !add_tariff_columns && !add_gas_column)
         return;
 
     const auto temporary_path = file_path.string() + ".tmp." + std::to_string(getpid());
@@ -263,6 +264,8 @@ void migrate_legacy_csv(const std::filesystem::path& file_path)
     if (add_tariff_columns)
         output << ",t1_consumption_meter_kwh,t2_consumption_meter_kwh"
                << ",t1_injection_meter_kwh,t2_injection_meter_kwh";
+    if (add_gas_column)
+        output << ",gas_meter_m3";
     output << '\n';
     std::string line;
     while (std::getline(input, line))
@@ -270,6 +273,8 @@ void migrate_legacy_csv(const std::filesystem::path& file_path)
         output << (has_legacy_telegram ? remove_second_csv_field(line) : line);
         if (add_tariff_columns)
             output << ",,,,";
+        if (add_gas_column)
+            output << ',';
         output << '\n';
     }
 
@@ -407,8 +412,8 @@ Measurement find_measurement(const std::string& telegram, const std::string& obi
         if (code_position == std::string::npos)
             continue;
 
-        const std::size_t opening_parenthesis = line.find('(', code_position + obis_code.size());
-        const std::size_t unit_separator = line.find('*', opening_parenthesis);
+        const std::size_t unit_separator = line.find('*', code_position + obis_code.size());
+        const std::size_t opening_parenthesis = line.rfind('(', unit_separator);
         const std::size_t closing_parenthesis = line.find(')', unit_separator);
         if (opening_parenthesis == std::string::npos ||
             unit_separator == std::string::npos ||
@@ -472,6 +477,10 @@ void load_latest_tariff_readings(const std::filesystem::path& telegram_path,
             if (injection.value && injection.unit == "kWh")
                 energy.tariff_injection_kwh[tariff] = injection.value;
         }
+
+        const Measurement gas = find_measurement(telegram, "24.2.3");
+        if (gas.value && gas.unit == "m3")
+            energy.gas_meter_m3 = gas.value;
     };
 
     while (std::getline(input, line))
@@ -509,6 +518,9 @@ void write_tariff_readings(std::ostream& output, const DailyEnergy& energy)
         if (reading)
             output << *reading;
     }
+    output << ',';
+    if (energy.gas_meter_m3)
+        output << *energy.gas_meter_m3;
     output.flags(original_flags);
     output.precision(original_precision);
 }
@@ -525,8 +537,13 @@ void migrate_daily_energy_summary(const std::filesystem::path& summary_path)
         return;
 
     std::string header;
-    if (!std::getline(input, header) ||
-        header.find("t1_consumption_meter_kwh") != std::string::npos)
+    if (!std::getline(input, header))
+        return;
+
+    const bool add_tariff_columns =
+        header.find("t1_consumption_meter_kwh") == std::string::npos;
+    const bool add_gas_column = header.find("gas_meter_m3") == std::string::npos;
+    if (!add_tariff_columns && !add_gas_column)
         return;
 
     const auto temporary_path = summary_path.string() + ".tmp." + std::to_string(getpid());
@@ -534,9 +551,13 @@ void migrate_daily_energy_summary(const std::filesystem::path& summary_path)
     if (!output)
         throw std::runtime_error("kan tijdelijk dagtotalenbestand niet openen: " + temporary_path);
 
-    output << header
-           << ",t1_consumption_meter_kwh,t2_consumption_meter_kwh"
-           << ",t1_injection_meter_kwh,t2_injection_meter_kwh\n";
+    output << header;
+    if (add_tariff_columns)
+        output << ",t1_consumption_meter_kwh,t2_consumption_meter_kwh"
+               << ",t1_injection_meter_kwh,t2_injection_meter_kwh";
+    if (add_gas_column)
+        output << ",gas_meter_m3";
+    output << '\n';
     std::string line;
     while (std::getline(input, line))
     {
@@ -550,7 +571,14 @@ void migrate_daily_energy_summary(const std::filesystem::path& summary_path)
             load_latest_tariff_readings(telegram_path, energy);
         }
         output << line;
-        write_tariff_readings(output, energy);
+        if (add_tariff_columns)
+            write_tariff_readings(output, energy);
+        else if (add_gas_column)
+        {
+            output << ',';
+            if (energy.gas_meter_m3)
+                output << std::fixed << std::setprecision(6) << *energy.gas_meter_m3;
+        }
         output << '\n';
     }
 
@@ -617,7 +645,7 @@ void P1Logger::open_daily_file()
                   << "l2_consumption_kw,l2_injection_kw,l2_current_a,l2_voltage_v,"
                   << "l3_consumption_kw,l3_injection_kw,l3_current_a,l3_voltage_v,"
                   << "t1_consumption_meter_kwh,t2_consumption_meter_kwh,"
-                  << "t1_injection_meter_kwh,t2_injection_meter_kwh\n";
+                  << "t1_injection_meter_kwh,t2_injection_meter_kwh,gas_meter_m3\n";
         csv_file_.flush();
     }
 
@@ -688,7 +716,7 @@ void P1Logger::load_daily_energy(const std::filesystem::path& csv_path)
     constexpr std::array<std::size_t, 3> injection_columns = {2, 6, 10};
     while (std::getline(csv_file, line))
     {
-        std::array<std::string, 17> fields;
+        std::array<std::string, 18> fields;
         std::istringstream row(line);
         std::size_t field_count = 0;
         while (field_count < fields.size() && std::getline(row, fields[field_count], ','))
@@ -718,6 +746,11 @@ void P1Logger::load_daily_energy(const std::filesystem::path& csv_path)
                         daily_energy_.tariff_injection_kwh[tariff] = reading;
                 }
             }
+        }
+        if (field_count > 17)
+        {
+            if (const auto reading = parse_csv_number(fields[17]))
+                daily_energy_.gas_meter_m3 = reading;
         }
     }
 }
@@ -816,7 +849,7 @@ void P1Logger::append_missing_daily_energy_summaries(const std::string& current_
                      << "total_consumption_kwh,l1_injection_kwh,l2_injection_kwh,"
                      << "l3_injection_kwh,total_injection_kwh,"
                      << "t1_consumption_meter_kwh,t2_consumption_meter_kwh,"
-                     << "t1_injection_meter_kwh,t2_injection_meter_kwh\n";
+                     << "t1_injection_meter_kwh,t2_injection_meter_kwh,gas_meter_m3\n";
     }
 
     summary_file << std::fixed << std::setprecision(6);
@@ -975,6 +1008,9 @@ void P1Logger::write_csv_row(const std::string& telegram)
         if (injection.value && injection.unit == "kWh")
             tariff_readings.tariff_injection_kwh[tariff] = injection.value;
     }
+    const Measurement gas = find_measurement(telegram, "24.2.3");
+    if (gas.value && gas.unit == "m3")
+        tariff_readings.gas_meter_m3 = gas.value;
     write_tariff_readings(csv_file_, tariff_readings);
 
     for (std::size_t phase = 0; phase < latest_phase_power_.size(); ++phase)
