@@ -24,6 +24,8 @@ Makefile
 .DS_Store
 Thumbs.db
 
-#python cache
+#python
 __pycache__/
+web/venv/
+*.pyc
 
