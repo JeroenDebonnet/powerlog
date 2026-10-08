@@ -20,6 +20,10 @@ namespace
 constexpr int lcd_columns = 20;
 constexpr std::array<std::uint8_t, 4> row_addresses = {0x00, 0x40, 0x14, 0x54};
 
+/** Formatteert een optioneel vermogen met twee decimalen.
+ * @param power Vermogen in kW, of std::nullopt als het niet beschikbaar is.
+ * @return De geformatteerde waarde, of "--.--" als het vermogen ontbreekt.
+ */
 std::string format_power(const std::optional<double>& power)
 {
     if (!power)
@@ -31,6 +35,11 @@ std::string format_power(const std::optional<double>& power)
 }
 }
 
+/** Opent en initialiseert het FreeNove-LCD via de opgegeven I2C-bus.
+ * @param i2c_device Pad naar het I2C-device.
+ * @param preferred_address Eerst te proberen PCF8574-adres.
+ * Gooit std::runtime_error als het I2C-device of LCD niet beschikbaar is.
+ */
 FreeNoveLcd::FreeNoveLcd(std::string i2c_device, std::uint8_t preferred_address)
 {
     i2c_fd_ = open(i2c_device.c_str(), O_RDWR);
@@ -55,12 +64,17 @@ FreeNoveLcd::FreeNoveLcd(std::string i2c_device, std::uint8_t preferred_address)
     throw std::runtime_error("geen FreeNove LCD gevonden op 0x27 of 0x3F");
 }
 
+/** Sluit de geopende I2C-device descriptor.
+ */
 FreeNoveLcd::~FreeNoveLcd()
 {
     if (i2c_fd_ >= 0)
         close(i2c_fd_);
 }
 
+/** Stuurt de hoge vier bits van een byte en pulseert de LCD-enable-lijn.
+ * @param value Byte waarvan de hoge nibble naar het LCD gaat.
+ */
 void FreeNoveLcd::write_nibble(std::uint8_t value)
 {
     output_state_ = static_cast<std::uint8_t>((value & 0xF0) | (output_state_ & 0x0F));
@@ -77,6 +91,9 @@ void FreeNoveLcd::write_nibble(std::uint8_t value)
     usleep(50);
 }
 
+/** Stuurt een volledig HD44780-commando in twee nibbles.
+ * @param value HD44780-commando.
+ */
 void FreeNoveLcd::command(std::uint8_t value)
 {
     output_state_ &= static_cast<std::uint8_t>(~0x01);
@@ -86,6 +103,9 @@ void FreeNoveLcd::command(std::uint8_t value)
         usleep(2000);
 }
 
+/** Stuurt een teken als LCD-data in twee nibbles.
+ * @param character ASCII-teken dat op het LCD wordt geschreven.
+ */
 void FreeNoveLcd::write_character(char character)
 {
     output_state_ |= 0x01;
@@ -93,6 +113,8 @@ void FreeNoveLcd::write_character(char character)
     write_nibble(static_cast<std::uint8_t>(character << 4));
 }
 
+/** Initialiseert het LCD in 4-bitmodus en schakelt het display in.
+ */
 void FreeNoveLcd::initialise()
 {
     output_state_ = 0x08;
@@ -111,6 +133,10 @@ void FreeNoveLcd::initialise()
     command(0x0C); // display on, cursor off
 }
 
+/** Schrijft tekst naar een rij en vult of kapt af tot twintig tekens.
+ * @param row LCD-rij, van 0 tot en met 3.
+ * @param text Tekst die op de rij wordt weergegeven.
+ */
 void FreeNoveLcd::write_line(int row, const std::string& text)
 {
     command(static_cast<std::uint8_t>(0x80 | row_addresses.at(static_cast<std::size_t>(row))));
@@ -118,6 +144,9 @@ void FreeNoveLcd::write_line(int row, const std::string& text)
         write_character(column < static_cast<int>(text.size()) ? text[static_cast<std::size_t>(column)] : ' ');
 }
 
+/** Toont het actuele afname- en injectievermogen per fase.
+ * @param phase_power Vermogenswaarden voor L1, L2 en L3.
+ */
 void FreeNoveLcd::update(const std::array<PhasePower, 3>& phase_power)
 {
     for (std::size_t phase = 0; phase < phase_power.size(); ++phase)

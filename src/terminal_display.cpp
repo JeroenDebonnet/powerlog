@@ -10,6 +10,9 @@
 
 namespace
 {
+/** Maakt een lokale tijdstempel voor de terminalweergave.
+ * @return Lokale datum en tijd in de vorm YYYY-MM-DD HH:MM:SS.
+ */
 std::string current_datetime()
 {
     const auto now = std::chrono::system_clock::now();
@@ -22,6 +25,9 @@ std::string current_datetime()
     return text.str();
 }
 
+/** Leest de CPU-temperatuur uit de Linux thermal-zone-interface.
+ * @return Temperatuur in graden Celsius met één decimaal, of "--" bij een leesfout.
+ */
 std::string cpu_temperature()
 {
     std::ifstream temperature_file("/sys/class/thermal/thermal_zone0/temp");
@@ -35,6 +41,10 @@ std::string cpu_temperature()
     return text.str();
 }
 
+/** Formatteert een energiewaarde in kWh met drie decimalen.
+ * @param energy_kwh Energie in kilowattuur.
+ * @return De geformatteerde energiewaarde.
+ */
 std::string format_energy(double energy_kwh)
 {
     std::ostringstream text;
@@ -43,6 +53,9 @@ std::string format_energy(double energy_kwh)
 }
 }
 
+/** Initialiseert ncurses en configureert de terminal voor niet-blokkerende invoer.
+ * Gooit std::runtime_error als ncurses niet kan worden gestart.
+ */
 TerminalDisplay::TerminalDisplay()
 {
     if (initscr() == nullptr)
@@ -55,11 +68,18 @@ TerminalDisplay::TerminalDisplay()
     keypad(stdscr, TRUE);
 }
 
+/** Herstelt de terminal en beëindigt de ncurses-sessie.
+ */
 TerminalDisplay::~TerminalDisplay()
 {
     endwin();
 }
 
+/** Toont live fasewaarden en dagtotalen en verwerkt de stoptoets.
+ * @param phase_measurements Vermogens-, stroom- en spanningsmetingen voor L1-L3.
+ * @param daily_energy Geïntegreerde dagtotalen en meterstanden.
+ * @return false als de gebruiker q/Q of de ncurses-exittoets indrukt; anders true.
+ */
 bool TerminalDisplay::update(const std::array<PhasePower, 3>& phase_measurements,
                              const DailyEnergy& daily_energy)
 {

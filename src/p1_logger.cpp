@@ -29,6 +29,10 @@ extern char** environ;
 
 namespace
 {
+/** Controleert of een pad de naam van een datumgebonden dag-CSV heeft.
+ * @param path Pad dat wordt gecontroleerd.
+ * @return true als het een CSV-bestand met een datum als YYYY-MM-DD-stam is.
+ */
 bool is_daily_csv(const std::filesystem::path& path)
 {
     if (path.extension() != ".csv")
@@ -44,6 +48,10 @@ bool is_daily_csv(const std::filesystem::path& path)
     });
 }
 
+/** Zet een lokale tijdstempel om naar een systeemtijdstip.
+ * @param value Tijdstempel in de vorm YYYY-MM-DDTHH:MM:SS.
+ * @return Het geparseerde tijdstip, of std::nullopt bij ongeldige invoer.
+ */
 std::optional<std::chrono::system_clock::time_point> parse_timestamp(const std::string& value)
 {
     std::tm local_time{};
@@ -59,6 +67,10 @@ std::optional<std::chrono::system_clock::time_point> parse_timestamp(const std::
     return std::chrono::system_clock::from_time_t(time);
 }
 
+/** Parseert een volledige, eindige numerieke CSV-waarde.
+ * @param value Tekstuele numerieke waarde.
+ * @return Het getal, of std::nullopt als de waarde ongeldig of niet-eindig is.
+ */
 std::optional<double> parse_csv_number(const std::string& value)
 {
     try
@@ -75,6 +87,9 @@ std::optional<double> parse_csv_number(const std::string& value)
     }
 }
 
+/** Start het plotprogramma voor een dag-CSV en meldt fouten asynchroon.
+ * @param csv_path Pad naar het CSV-bestand dat wordt geplot.
+ */
 void launch_plot(const std::filesystem::path& csv_path)
 {
     const auto executable_path = std::filesystem::canonical("/proc/self/exe");
@@ -134,6 +149,10 @@ void launch_plot(const std::filesystem::path& csv_path)
     }).detach();
 }
 
+/** Start plots voor afgesloten dagbestanden waarvoor nog geen PNG bestaat.
+ * @param log_directory Map met dag-CSV-bestanden.
+ * @param current_date Huidige datum als YYYY-MM-DD; bestanden vanaf deze datum worden overgeslagen.
+ */
 void render_pending_daily_csvs(const std::filesystem::path& log_directory,
                                const std::string& current_date)
 {
@@ -211,6 +230,7 @@ std::string remove_second_csv_field(const std::string& line)
 
 /** Migreert een bestaande logfile die nog een telegramkolom bevat.
  * @param file_path Pad naar de dagelijkse meetwaardenlog.
+ * Bij lees-, schrijf- of migratiefouten wordt een uitzondering gegooid.
  */
 void migrate_legacy_csv(const std::filesystem::path& file_path)
 {
@@ -219,7 +239,19 @@ void migrate_legacy_csv(const std::filesystem::path& file_path)
         throw std::runtime_error("kan bestaande CSV niet lezen: " + file_path.string());
 
     std::string header;
-    if (!std::getline(input, header) || header.rfind("timestamp,telegram,", 0) != 0)
+    if (!std::getline(input, header))
+        return;
+
+    const bool has_legacy_telegram = header.rfind("timestamp,telegram,", 0) == 0;
+    if (!has_legacy_telegram && header.rfind("timestamp,", 0) != 0)
+        return;
+
+    const std::string migrated_header = has_legacy_telegram
+        ? remove_second_csv_field(header)
+        : header;
+    const bool add_tariff_columns =
+        migrated_header.find("t1_consumption_meter_kwh") == std::string::npos;
+    if (!has_legacy_telegram && !add_tariff_columns)
         return;
 
     const auto temporary_path = file_path.string() + ".tmp." + std::to_string(getpid());
@@ -227,10 +259,19 @@ void migrate_legacy_csv(const std::filesystem::path& file_path)
     if (!output)
         throw std::runtime_error("kan tijdelijke CSV niet openen: " + temporary_path);
 
-    output << remove_second_csv_field(header) << '\n';
+    output << migrated_header;
+    if (add_tariff_columns)
+        output << ",t1_consumption_meter_kwh,t2_consumption_meter_kwh"
+               << ",t1_injection_meter_kwh,t2_injection_meter_kwh";
+    output << '\n';
     std::string line;
     while (std::getline(input, line))
-        output << remove_second_csv_field(line) << '\n';
+    {
+        output << (has_legacy_telegram ? remove_second_csv_field(line) : line);
+        if (add_tariff_columns)
+            output << ",,,,";
+        output << '\n';
+    }
 
     output.flush();
     if (!input.eof() || !output)
@@ -400,6 +441,132 @@ void write_measurement(std::ostream& output, const Measurement& measurement)
     if (measurement.value)
         output << *measurement.value;
 }
+
+/** Zoekt de laatst beschikbare meterstanden in een telegramarchief.
+ * @param telegram_path Pad naar het daggebonden telegramlog.
+ * @param energy Structuur die met gevonden T1/T2-standen wordt bijgewerkt.
+ */
+void load_latest_tariff_readings(const std::filesystem::path& telegram_path,
+                                 DailyEnergy& energy)
+{
+    std::ifstream input(telegram_path);
+    if (!input)
+        return;
+
+    constexpr std::array consumption_codes = {"1.8.1", "1.8.2"};
+    constexpr std::array injection_codes = {"2.8.1", "2.8.2"};
+    std::string telegram;
+    std::string line;
+    const auto read_telegram = [&]
+    {
+        if (telegram.empty())
+            return;
+
+        for (std::size_t tariff = 0; tariff < consumption_codes.size(); ++tariff)
+        {
+            const Measurement consumption = find_measurement(telegram, consumption_codes[tariff]);
+            if (consumption.value && consumption.unit == "kWh")
+                energy.tariff_consumption_kwh[tariff] = consumption.value;
+
+            const Measurement injection = find_measurement(telegram, injection_codes[tariff]);
+            if (injection.value && injection.unit == "kWh")
+                energy.tariff_injection_kwh[tariff] = injection.value;
+        }
+    };
+
+    while (std::getline(input, line))
+    {
+        if (line.rfind("# minute=", 0) == 0)
+        {
+            read_telegram();
+            telegram.clear();
+            continue;
+        }
+        telegram += line;
+        telegram += '\n';
+    }
+    read_telegram();
+}
+
+/** Schrijft de vier optionele T1/T2-meterstanden als CSV-velden.
+ * @param output Uitvoerstroom voor de CSV-velden.
+ * @param energy Meterstanden voor afname en injectie.
+ */
+void write_tariff_readings(std::ostream& output, const DailyEnergy& energy)
+{
+    const auto original_flags = output.flags();
+    const auto original_precision = output.precision();
+    output << std::fixed << std::setprecision(6);
+    for (const auto& reading : energy.tariff_consumption_kwh)
+    {
+        output << ',';
+        if (reading)
+            output << *reading;
+    }
+    for (const auto& reading : energy.tariff_injection_kwh)
+    {
+        output << ',';
+        if (reading)
+            output << *reading;
+    }
+    output.flags(original_flags);
+    output.precision(original_precision);
+}
+
+/** Voegt meterstandkolommen toe aan een bestaand dagtotalenbestand.
+ * Bestaande dagregels worden waar mogelijk aangevuld uit hun telegramarchief.
+ * @param summary_path Pad naar daily_energy.csv.
+ * Bij migratiefouten wordt een uitzondering gegooid.
+ */
+void migrate_daily_energy_summary(const std::filesystem::path& summary_path)
+{
+    std::ifstream input(summary_path);
+    if (!input)
+        return;
+
+    std::string header;
+    if (!std::getline(input, header) ||
+        header.find("t1_consumption_meter_kwh") != std::string::npos)
+        return;
+
+    const auto temporary_path = summary_path.string() + ".tmp." + std::to_string(getpid());
+    std::ofstream output(temporary_path, std::ios::out | std::ios::trunc);
+    if (!output)
+        throw std::runtime_error("kan tijdelijk dagtotalenbestand niet openen: " + temporary_path);
+
+    output << header
+           << ",t1_consumption_meter_kwh,t2_consumption_meter_kwh"
+           << ",t1_injection_meter_kwh,t2_injection_meter_kwh\n";
+    std::string line;
+    while (std::getline(input, line))
+    {
+        const std::size_t separator = line.find(',');
+        DailyEnergy energy;
+        if (separator != std::string::npos)
+        {
+            const std::string date = line.substr(0, separator);
+            const auto telegram_path = summary_path.parent_path() /
+                (date + "-TELEGRAM.log");
+            load_latest_tariff_readings(telegram_path, energy);
+        }
+        output << line;
+        write_tariff_readings(output, energy);
+        output << '\n';
+    }
+
+    output.flush();
+    if (!input.eof() || !output)
+    {
+        output.close();
+        std::filesystem::remove(temporary_path);
+        throw std::runtime_error("fout bij migreren van dagtotalenbestand: " +
+                                 summary_path.string());
+    }
+
+    input.close();
+    output.close();
+    std::filesystem::rename(temporary_path, summary_path);
+}
 }
 
 /** Maakt een P1Logger aan voor een seriële poort en dagelijkse CSV-bestanden.
@@ -448,7 +615,9 @@ void P1Logger::open_daily_file()
         csv_file_ << "timestamp,"
                   << "l1_consumption_kw,l1_injection_kw,l1_current_a,l1_voltage_v,"
                   << "l2_consumption_kw,l2_injection_kw,l2_current_a,l2_voltage_v,"
-                  << "l3_consumption_kw,l3_injection_kw,l3_current_a,l3_voltage_v\n";
+                  << "l3_consumption_kw,l3_injection_kw,l3_current_a,l3_voltage_v,"
+                  << "t1_consumption_meter_kwh,t2_consumption_meter_kwh,"
+                  << "t1_injection_meter_kwh,t2_injection_meter_kwh\n";
         csv_file_.flush();
     }
 
@@ -506,6 +675,10 @@ void P1Logger::load_daily_energy(const std::filesystem::path& csv_path)
     previous_consumption_kw_ = {};
     previous_injection_kw_ = {};
 
+    const auto telegram_path = csv_path.parent_path() /
+        (csv_path.stem().string() + "-TELEGRAM.log");
+    load_latest_tariff_readings(telegram_path, daily_energy_);
+
     std::ifstream csv_file(csv_path);
     std::string line;
     if (!std::getline(csv_file, line))
@@ -515,12 +688,12 @@ void P1Logger::load_daily_energy(const std::filesystem::path& csv_path)
     constexpr std::array<std::size_t, 3> injection_columns = {2, 6, 10};
     while (std::getline(csv_file, line))
     {
-        std::array<std::string, 13> fields;
+        std::array<std::string, 17> fields;
         std::istringstream row(line);
         std::size_t field_count = 0;
         while (field_count < fields.size() && std::getline(row, fields[field_count], ','))
             ++field_count;
-        if (field_count != fields.size())
+        if (field_count < 13)
             continue;
 
         std::array<PhasePower, 3> phase_power;
@@ -530,12 +703,29 @@ void P1Logger::load_daily_energy(const std::filesystem::path& csv_path)
             phase_power[phase].injection_kw = parse_csv_number(fields[injection_columns[phase]]);
         }
         accumulate_energy_sample(fields[0], phase_power);
+        if (field_count > 13)
+        {
+            for (std::size_t tariff = 0; tariff < 2; ++tariff)
+            {
+                if (field_count > 13 + tariff)
+                {
+                    if (const auto reading = parse_csv_number(fields[13 + tariff]))
+                        daily_energy_.tariff_consumption_kwh[tariff] = reading;
+                }
+                if (field_count > 15 + tariff)
+                {
+                    if (const auto reading = parse_csv_number(fields[15 + tariff]))
+                        daily_energy_.tariff_injection_kwh[tariff] = reading;
+                }
+            }
+        }
     }
 }
 
 void P1Logger::append_missing_daily_energy_summaries(const std::string& current_date)
 {
     const auto summary_path = log_directory_ / "daily_energy.csv";
+    migrate_daily_energy_summary(summary_path);
     std::set<std::string> recorded_dates;
     std::ifstream existing_summary(summary_path);
     if (existing_summary)
@@ -624,7 +814,9 @@ void P1Logger::append_missing_daily_energy_summaries(const std::string& current_
     {
         summary_file << "date,l1_consumption_kwh,l2_consumption_kwh,l3_consumption_kwh,"
                      << "total_consumption_kwh,l1_injection_kwh,l2_injection_kwh,"
-                     << "l3_injection_kwh,total_injection_kwh\n";
+                     << "l3_injection_kwh,total_injection_kwh,"
+                     << "t1_consumption_meter_kwh,t2_consumption_meter_kwh,"
+                     << "t1_injection_meter_kwh,t2_injection_meter_kwh\n";
     }
 
     summary_file << std::fixed << std::setprecision(6);
@@ -644,7 +836,9 @@ void P1Logger::append_missing_daily_energy_summaries(const std::string& current_
                      << energy.injection_kwh[0] << ','
                      << energy.injection_kwh[1] << ','
                      << energy.injection_kwh[2] << ','
-                     << total_injection << '\n';
+                     << total_injection;
+        write_tariff_readings(summary_file, energy);
+        summary_file << '\n';
     }
     summary_file.flush();
     if (!summary_file)
@@ -768,6 +962,20 @@ void P1Logger::write_csv_row(const std::string& telegram)
             write_measurement(csv_file_, find_measurement(telegram, code));
         }
     }
+
+    DailyEnergy tariff_readings;
+    constexpr std::array consumption_codes = {"1.8.1", "1.8.2"};
+    constexpr std::array injection_codes = {"2.8.1", "2.8.2"};
+    for (std::size_t tariff = 0; tariff < consumption_codes.size(); ++tariff)
+    {
+        const Measurement consumption = find_measurement(telegram, consumption_codes[tariff]);
+        const Measurement injection = find_measurement(telegram, injection_codes[tariff]);
+        if (consumption.value && consumption.unit == "kWh")
+            tariff_readings.tariff_consumption_kwh[tariff] = consumption.value;
+        if (injection.value && injection.unit == "kWh")
+            tariff_readings.tariff_injection_kwh[tariff] = injection.value;
+    }
+    write_tariff_readings(csv_file_, tariff_readings);
 
     for (std::size_t phase = 0; phase < latest_phase_power_.size(); ++phase)
     {

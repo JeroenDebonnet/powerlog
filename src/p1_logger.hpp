@@ -19,16 +19,17 @@ struct DailyEnergy
 {
     std::array<double, 3> consumption_kwh{};
     std::array<double, 3> injection_kwh{};
+    std::array<std::optional<double>, 2> tariff_consumption_kwh{};
+    std::array<std::optional<double>, 2> tariff_injection_kwh{};
 };
 
 class P1Logger
 {
 public:
-    /**
-    * Maakt een logger aan die dagelijkse CSV-bestanden in de logmap schrijft.
+    /** Maakt een logger aan die dagelijkse CSV-bestanden in de logmap schrijft.
      * @param serial_device Pad naar de RS232/seriële poort.
-    * @param log_directory Map waarin dagelijkse CSV-bestanden worden opgeslagen.
-    *                       Een lege map gebruikt de map van de executable.
+     * @param log_directory Map waarin dagelijkse CSV-bestanden worden opgeslagen.
+     *                      Een lege map gebruikt de map van de executable.
      * @param baud_rate Baudrate van de seriële poort.
      */
     P1Logger(std::string serial_device, std::string log_directory = {}, int baud_rate = 115200);
@@ -36,7 +37,14 @@ public:
     /** Sluit de seriële poort wanneer de logger wordt vernietigd. */
     ~P1Logger();
 
+    /** Verbiedt kopiëren om het eigendom van de seriële verbinding uniek te houden.
+     * @param other Logger waarvan kopiëren wordt voorkomen.
+     */
     P1Logger(const P1Logger&) = delete;
+
+    /** Verbiedt toewijzing om het eigendom van de seriële verbinding uniek te houden.
+     * @param other Andere logger waarvan toewijzing wordt voorkomen.
+     */
     P1Logger& operator=(const P1Logger&) = delete;
 
     /**
@@ -45,33 +53,52 @@ public:
      */
     void run();
 
-    /** Geeft de laatst succesvol CRC-gevalideerde vermogenswaarden terug. */
+    /** Geeft de laatst succesvol CRC-gevalideerde vermogenswaarden terug.
+     * @return Vermogens-, stroom- en spanningswaarden per fase.
+     */
     const std::array<PhasePower, 3>& latest_phase_power() const;
 
-    /** Geeft de geïntegreerde afname en injectie van de huidige lokale dag terug. */
+    /** Geeft de geïntegreerde afname en injectie van de huidige lokale dag terug.
+     * @return Dagtotalen en de laatst bekende T1/T2-meterstanden.
+     */
     const DailyEnergy& daily_energy() const;
 
 private:
-    /** Opent en configureert de seriële poort als non-blocking 8N1-verbinding. */
+    /** Opent en configureert de seriële poort als non-blocking 8N1-verbinding.
+        * Bij een fout wordt een uitzondering gegooid.
+     */
     void open_serial();
 
-    /** Opent het datumgebonden CSV-bestand als de lokale datum is gewijzigd. */
+    /** Opent het datumgebonden CSV-bestand als de lokale datum is gewijzigd.
+        * Bij een fout wordt een uitzondering gegooid.
+     */
     void open_daily_file();
 
-    /** Herstelt de energietotalen en laatste meting uit het huidige dagbestand. */
+    /** Herstelt dagtotalen en meterstanden uit het dagbestand en telegramarchief.
+     * @param csv_path Pad naar het datumgebonden meet-CSV-bestand.
+     */
     void load_daily_energy(const std::filesystem::path& csv_path);
 
-    /** Schrijft ontbrekende samenvattingsregels voor afgesloten dagbestanden. */
+    /** Schrijft ontbrekende samenvattingsregels voor afgesloten dagbestanden.
+     * @param current_date Huidige datum als YYYY-MM-DD; deze dag blijft open.
+     */
     void append_missing_daily_energy_summaries(const std::string& current_date);
 
-    /** Integreert één meting met de vorige meting voor de dagtotalen. */
+    /** Integreert één meting met de vorige meting voor de dagtotalen.
+     * @param timestamp Tijdstempel van de meting in de vorm YYYY-MM-DDTHH:MM:SS.
+     * @param phase_power Vermogenswaarden van de drie fasen voor deze meting.
+     */
     void accumulate_energy_sample(const std::string& timestamp,
                                   const std::array<PhasePower, 3>& phase_power);
 
-    /** Schrijft hoogstens één telegram per minuut naar het telegramlog. */
+    /** Schrijft hoogstens één telegram per lokale minuut naar het telegramlog.
+     * @param telegram Volledig, CRC-gevalideerd P1-telegram.
+     */
     void write_telegram_if_due(const std::string& telegram);
 
-    /** Leest alle momenteel beschikbare bytes naar de interne invoerbuffer. */
+    /** Leest alle momenteel beschikbare bytes naar de interne invoerbuffer.
+        * Bij een leesfout wordt een uitzondering gegooid.
+     */
     void read_available_bytes();
 
     /** Parseert een geldig telegram en schrijft meetwaarden en periodiek het telegram weg.

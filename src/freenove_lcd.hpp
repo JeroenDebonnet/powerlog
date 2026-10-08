@@ -20,7 +20,14 @@ public:
     /** Sluit de I2C-device descriptor. */
     ~FreeNoveLcd();
 
+    /** Verbiedt kopiëren omdat de I2C-device descriptor uniek eigendom is.
+     * @param other LCD-object waarvan kopiëren wordt voorkomen.
+     */
     FreeNoveLcd(const FreeNoveLcd&) = delete;
+
+    /** Verbiedt toewijzing om gedeeld eigendom van de I2C-device te voorkomen.
+     * @param other LCD-object waarvan toewijzing wordt voorkomen.
+     */
     FreeNoveLcd& operator=(const FreeNoveLcd&) = delete;
 
     /** Toont het actuele afname- en injectievermogen van de drie fasen.

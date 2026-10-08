@@ -16,11 +16,19 @@ public:
     /** Herstelt de terminalinstellingen en sluit ncurses. */
     ~TerminalDisplay();
 
+        /** Verbiedt kopiëren omdat dit object eigenaar is van de ncurses-sessie.
+         * @param other Terminalobject waarvan kopiëren wordt voorkomen.
+         */
     TerminalDisplay(const TerminalDisplay&) = delete;
+
+        /** Verbiedt toewijzing omdat dit object eigenaar is van de ncurses-sessie.
+         * @param other Terminalobject waarvan toewijzing wordt voorkomen.
+         */
     TerminalDisplay& operator=(const TerminalDisplay&) = delete;
 
     /** Toont de gemeten waarden van alle drie fasen.
      * @param phase_measurements Meetwaarden voor L1, L2 en L3.
+         * @param daily_energy Dagtotalen en meterstanden voor de huidige dag.
      * @return false wanneer de gebruiker 'q' indrukt of de terminal sluit.
      */
     bool update(const std::array<PhasePower, 3>& phase_measurements,
