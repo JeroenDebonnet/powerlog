@@ -60,6 +60,76 @@ def read_csv(filename):
     return pd.read_csv(path)
 
 
+def daily_energy_totals(df):
+    totals = []
+    for columns in (
+        ("t1_consumption_meter_kwh", "t2_consumption_meter_kwh"),
+        ("t1_injection_meter_kwh", "t2_injection_meter_kwh"),
+    ):
+        if not all(column in df.columns for column in columns):
+            totals.append(None)
+            continue
+
+        deltas = []
+        for column in columns:
+            readings = pd.to_numeric(df[column], errors="coerce").dropna()
+            if len(readings) < 2:
+                deltas = []
+                break
+            deltas.append(readings.iloc[-1] - readings.iloc[0])
+
+        totals.append(sum(deltas) if deltas else None)
+
+    return totals
+
+
+def integrated_power_totals(df):
+    consumption_columns = (
+        "l1_consumption_kw",
+        "l2_consumption_kw",
+        "l3_consumption_kw",
+    )
+    injection_columns = (
+        "l1_injection_kw",
+        "l2_injection_kw",
+        "l3_injection_kw",
+    )
+    power_columns = consumption_columns + injection_columns
+    if "timestamp" not in df.columns or not all(
+        column in df.columns for column in power_columns
+    ):
+        return None, None
+
+    samples = df[["timestamp", *power_columns]].copy()
+    samples["timestamp"] = pd.to_datetime(samples["timestamp"], errors="coerce")
+    samples = samples.dropna(subset=["timestamp"]).sort_values("timestamp")
+    elapsed_seconds = samples["timestamp"].diff().dt.total_seconds()
+    valid_interval = elapsed_seconds.gt(0) & elapsed_seconds.le(5)
+
+    def integrate(columns):
+        total = 0
+        for column in columns:
+            power = pd.to_numeric(samples[column], errors="coerce")
+            previous_power = power.shift(1)
+            interval_energy = (
+                (power + previous_power)
+                * 0.5
+                * elapsed_seconds
+                / 3600
+            )
+            valid_power = power.ge(0) & previous_power.ge(0)
+            total += interval_energy.where(valid_interval & valid_power).sum()
+        return total
+
+    return integrate(consumption_columns), integrate(injection_columns)
+
+
+def format_energy_total(value):
+    if value is None:
+        return "niet beschikbaar"
+    return f"{value:.2f}".replace(".", ",")
+
+
 app.layout = html.Div(
     style={
         "fontFamily": "Arial, sans-serif",
@@ -158,6 +228,10 @@ app.layout = html.Div(
                         "scrollZoom": True,
                     },
                 ),
+                html.Div(
+                    id="daily-energy-summary",
+                    style={"marginTop": "8px", "fontSize": "16px"},
+                ),
             ],
         ),
     ],
@@ -253,6 +327,7 @@ def select_value_preset(preset, options):
 
 @app.callback(
     Output("time-graph", "figure"),
+    Output("daily-energy-summary", "children"),
     Input("csv-file", "value"),
     Input("value-columns", "value"),
     Input("graph-type", "value"),
@@ -269,10 +344,10 @@ def update_graph(filename, value_columns, graph_type):
     if graph_type == "gas_graph":
         if "gas_meter_m3" not in df.columns:
             raise PreventUpdate
-        return build_gas_graph(df, filename)
+        return build_gas_graph(df, filename), []
 
     if graph_type == "netto_power_graph":
-        return build_netto_power_graph(df, filename)
+        return build_netto_power_graph(df, filename), []
 
     if not value_columns:
         raise PreventUpdate
@@ -286,7 +361,22 @@ def update_graph(filename, value_columns, graph_type):
     if not selected_columns:
         raise PreventUpdate
 
-    return build_power_graph(df, filename, "timestamp", selected_columns)
+    consumption, injection = daily_energy_totals(df)
+    integrated_consumption, integrated_injection = integrated_power_totals(df)
+    summary = [
+        html.Div(
+            f"Verbruikt: meterstanden {format_energy_total(consumption)} kWh | "
+            f"vermogensintegratie {format_energy_total(integrated_consumption)} kWh"
+        ),
+        html.Div(
+            f"Geïnjecteerd: meterstanden {format_energy_total(injection)} kWh | "
+            f"vermogensintegratie {format_energy_total(integrated_injection)} kWh"
+        ),
+    ]
+    return (
+        build_power_graph(df, filename, "timestamp", selected_columns),
+        summary,
+    )
 
 
 if __name__ == "__main__":
